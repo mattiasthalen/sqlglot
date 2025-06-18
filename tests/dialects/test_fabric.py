@@ -55,13 +55,13 @@ class TestFabric(Validator):
         # Test deprecated data types conversion
         self.validate_all(
             "CREATE TABLE test (id INT, amount MONEY)",
-            write={"fabric": "CREATE TABLE test (id INTEGER, amount DECIMAL(19,4))"},
+            write={"fabric": "CREATE TABLE test (id INTEGER, amount DECIMAL(19, 4))"},
         )
 
         self.validate_all(
             "CREATE TABLE test (small_amount SMALLMONEY, blob_data IMAGE)",
             write={
-                "fabric": "CREATE TABLE test (small_amount DECIMAL(10,4), blob_data VARBINARY(MAX))"
+                "fabric": "CREATE TABLE test (small_amount DECIMAL(10, 4), blob_data VARBINARY(MAX))"
             },
         )
 

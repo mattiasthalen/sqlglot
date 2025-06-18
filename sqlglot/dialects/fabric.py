@@ -5,6 +5,7 @@ import typing as t
 from sqlglot import exp
 from sqlglot.dialects.dialect import NormalizationStrategy
 from sqlglot.dialects.tsql import TSQL
+from sqlglot.tokens import TokenType
 
 if t.TYPE_CHECKING:
     pass
@@ -30,6 +31,56 @@ class Fabric(TSQL):
     # Fabric requires fully qualified names for tables
     SUPPORTS_UNQUALIFIED_TABLES = False
 
+    # Supported data types in Fabric Data Warehouse (based on Microsoft documentation)
+    SUPPORTED_DATA_TYPES = {
+        # Exact numerics
+        "BIT",
+        "SMALLINT",
+        "INT",
+        "BIGINT",
+        "DECIMAL",
+        "NUMERIC",
+        # Approximate numerics
+        "FLOAT",
+        "REAL",
+        # Date and time (with precision limitations)
+        "DATE",
+        "TIME",
+        "DATETIME2",
+        # Fixed-length character strings
+        "CHAR",
+        # Variable length character strings
+        "VARCHAR",
+        # Binary strings
+        "VARBINARY",
+        "UNIQUEIDENTIFIER",
+    }
+
+    # Unsupported data types and their recommended alternatives
+    UNSUPPORTED_DATA_TYPES = {
+        "MONEY": "DECIMAL(19,4)",
+        "SMALLMONEY": "DECIMAL(10,4)",
+        "DATETIME": "DATETIME2",
+        "SMALLDATETIME": "DATETIME2",
+        "DATETIMEOFFSET": "DATETIME2",  # Note: timezone info is lost
+        "NCHAR": "CHAR",  # Use CHAR with UTF-8 collation
+        "NVARCHAR": "VARCHAR",  # Use VARCHAR with UTF-8 collation
+        "TEXT": "VARCHAR(MAX)",
+        "NTEXT": "VARCHAR(MAX)",
+        "IMAGE": "VARBINARY(MAX)",
+        "TINYINT": "SMALLINT",
+        "GEOGRAPHY": "VARBINARY(MAX)",  # Store as WKB or lat/lng pair
+        "GEOMETRY": "VARBINARY(MAX)",  # Store as WKB or lat/lng pair
+        "JSON": "VARCHAR(MAX)",
+        "XML": "VARCHAR(MAX)",  # No equivalent, use VARCHAR as fallback
+    }
+
+    # Data type precision limitations
+    PRECISION_LIMITS = {
+        "DATETIME2": 6,  # Maximum 6 digits precision for fractions of seconds
+        "TIME": 6,  # Maximum 6 digits precision for fractions of seconds
+    }
+
     class Tokenizer(TSQL.Tokenizer):
         # Fabric uses case-sensitive keywords
         CASE_SENSITIVE = True
@@ -47,10 +98,62 @@ class Fabric(TSQL):
         def _parse_types(
             self, check_func: bool = False, schema: bool = False, allow_identifiers: bool = True
         ) -> t.Optional[exp.Expression]:
-            """Override to handle Fabric-specific type conversions."""
-            # Handle NTEXT -> NVARCHAR(MAX) conversion
+            """Override to handle Fabric-specific type conversions during parsing."""
+            # Handle deprecated/unsupported data types during parsing
+
+            # NTEXT -> VARCHAR(MAX)
             if self._match_text_seq("NTEXT"):
-                return exp.DataType.build("NVARCHAR(MAX)")
+                return exp.DataType.build("VARCHAR(MAX)")
+
+            # TEXT -> VARCHAR(MAX)
+            if self._match_text_seq("TEXT") and not self._match_text_seq(
+                "LONGTEXT", "MEDIUMTEXT", "TINYTEXT"
+            ):
+                return exp.DataType.build("VARCHAR(MAX)")
+
+            # DATETIME -> DATETIME2
+            if self._match_text_seq("DATETIME") and not self._match_text_seq("DATETIME2"):
+                # Check if there's a precision specifier
+                precision = None
+                if self._match(TokenType.L_PAREN):
+                    precision = self._parse_number()
+                    self._match_r_paren()
+
+                if precision:
+                    return exp.DataType.build(f"DATETIME2({precision})")
+                return exp.DataType.build("DATETIME2")
+
+            # SMALLDATETIME -> DATETIME2
+            if self._match_text_seq("SMALLDATETIME"):
+                return exp.DataType.build("DATETIME2")
+
+            # DATETIMEOFFSET -> DATETIME2 (with note that timezone info is lost)
+            if self._match_text_seq("DATETIMEOFFSET"):
+                # Check if there's a precision specifier
+                precision = None
+                if self._match(TokenType.L_PAREN):
+                    precision = self._parse_number()
+                    self._match_r_paren()
+
+                if precision:
+                    return exp.DataType.build(f"DATETIME2({precision})")
+                return exp.DataType.build("DATETIME2")
+
+            # TINYINT -> SMALLINT
+            if self._match_text_seq("TINYINT"):
+                return exp.DataType.build("SMALLINT")
+
+            # MONEY -> DECIMAL(19,4)
+            if self._match_text_seq("MONEY") and not self._match_text_seq("SMALLMONEY"):
+                return exp.DataType.build("DECIMAL(19,4)")
+
+            # SMALLMONEY -> DECIMAL(10,4)
+            if self._match_text_seq("SMALLMONEY"):
+                return exp.DataType.build("DECIMAL(10,4)")
+
+            # IMAGE -> VARBINARY(MAX)
+            if self._match_text_seq("IMAGE"):
+                return exp.DataType.build("VARBINARY(MAX)")
 
             return super()._parse_types(
                 check_func=check_func, schema=schema, allow_identifiers=allow_identifiers
@@ -79,10 +182,20 @@ class Fabric(TSQL):
         # Override type mappings for Fabric-specific data types
         TYPE_MAPPING = {
             **TSQL.Generator.TYPE_MAPPING,
-            # Fabric has specific data type limitations
-            exp.DataType.Type.MONEY: "DECIMAL(19,4)",  # MONEY not supported, use DECIMAL
-            exp.DataType.Type.SMALLMONEY: "DECIMAL(10,4)",  # SMALLMONEY not supported
+            # Override TSQL's DECIMAL -> NUMERIC mapping to keep DECIMAL
+            exp.DataType.Type.DECIMAL: "DECIMAL",
+            # Fabric has specific data type limitations - map unsupported types to alternatives
+            # Note: MONEY and SMALLMONEY are handled in datatype_sql method for precise formatting
             exp.DataType.Type.IMAGE: "VARBINARY(MAX)",  # IMAGE deprecated, use VARBINARY(MAX)
+            exp.DataType.Type.TEXT: "VARCHAR(MAX)",  # TEXT not supported, use VARCHAR(MAX)
+            exp.DataType.Type.NCHAR: "CHAR",  # NCHAR not supported, use CHAR with UTF-8 collation
+            exp.DataType.Type.NVARCHAR: "VARCHAR",  # NVARCHAR not supported, use VARCHAR with UTF-8 collation
+            exp.DataType.Type.SMALLDATETIME: "DATETIME2",  # SMALLDATETIME not supported, use DATETIME2
+            exp.DataType.Type.TINYINT: "SMALLINT",  # TINYINT not supported, use SMALLINT
+            exp.DataType.Type.GEOGRAPHY: "VARBINARY(MAX)",  # GEOGRAPHY not supported, use VARBINARY or VARCHAR
+            exp.DataType.Type.GEOMETRY: "VARBINARY(MAX)",  # GEOMETRY not supported, use VARBINARY or VARCHAR
+            exp.DataType.Type.JSON: "VARCHAR(MAX)",  # JSON not supported, use VARCHAR
+            exp.DataType.Type.XML: "VARCHAR(MAX)",  # XML not supported, use VARCHAR as fallback
         }
 
         def create_sql(self, expression: exp.Create) -> str:
@@ -242,15 +355,43 @@ class Fabric(TSQL):
 
         def datatype_sql(self, expression: exp.DataType) -> str:
             """Override data types for Fabric-specific limitations."""
-            # Handle deprecated data types
+
+            # Handle types that need precise formatting control
             if expression.this == exp.DataType.Type.MONEY:
                 return "DECIMAL(19,4)"
             elif expression.this == exp.DataType.Type.SMALLMONEY:
                 return "DECIMAL(10,4)"
-            elif expression.this == exp.DataType.Type.IMAGE:
-                return "VARBINARY(MAX)"
-            elif expression.this == exp.DataType.Type.TIMESTAMP:
-                # In Fabric, TIMESTAMP is an alias for ROWVERSION
-                return "ROWVERSION"
 
+            # Handle precision limits for temporal types
+            if expression.this == exp.DataType.Type.DATETIME2:
+                # Limit precision for datetime2 to 6 digits as per Fabric documentation
+                if expression.expressions:
+                    precision = self.sql(expression.expressions[0])
+                    try:
+                        prec_int = int(precision)
+                        if prec_int > 6:
+                            return "DATETIME2(6)"
+                    except ValueError:
+                        pass
+            elif expression.this == exp.DataType.Type.TIME:
+                # Limit precision for time to 6 digits as per Fabric documentation
+                if expression.expressions:
+                    precision = self.sql(expression.expressions[0])
+                    try:
+                        prec_int = int(precision)
+                        if prec_int > 6:
+                            return "TIME(6)"
+                    except ValueError:
+                        pass
+
+            # Handle special cases for string-based types that may not be in the enum
+            type_str = str(expression.this).upper() if expression.this else ""
+            if type_str == "NTEXT":
+                return "VARCHAR(MAX)"
+            elif type_str == "DATETIME" and expression.this != exp.DataType.Type.DATETIME2:
+                return "DATETIME2"
+            elif type_str == "DATETIMEOFFSET":
+                return "DATETIME2"
+
+            # Use the standard TYPE_MAPPING for everything else
             return super().datatype_sql(expression)
