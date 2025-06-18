@@ -13,6 +13,7 @@ if t.TYPE_CHECKING:
 
 class Fabric(TSQL):
     """Microsoft Fabric SQL Analytics Endpoint dialect.
+    https://learn.microsoft.com/en-us/fabric/data-warehouse/tsql-surface-area
 
     Microsoft Fabric is a unified data platform that includes SQL Analytics Endpoints
     for data warehouses. It uses a T-SQL dialect with specific limitations and requirements.
@@ -23,6 +24,11 @@ class Fabric(TSQL):
     - INFORMATION_SCHEMA tables are uppercase
     - Limited T-SQL surface area (subset of T-SQL functionality)
     - Different data type support and limitations
+    - No support for many ALTER TABLE operations (only limited subset)
+    - No support for IDENTITY columns, MERGE, materialized views, triggers
+    - Session-scoped distributed #temp tables are supported
+    - TRUNCATE TABLE is supported
+    - Limited query hints support
     """
 
     # Fabric is case-sensitive unlike standard T-SQL
@@ -30,6 +36,22 @@ class Fabric(TSQL):
 
     # Fabric requires fully qualified names for tables
     SUPPORTS_UNQUALIFIED_TABLES = False
+
+    # Fabric specific limitations
+    SUPPORTS_IDENTITY_COLUMNS = False
+    SUPPORTS_MERGE = False
+    SUPPORTS_MATERIALIZED_VIEWS = False
+    SUPPORTS_TRIGGERS = False
+    SUPPORTS_RECURSIVE_QUERIES = False
+    SUPPORTS_RESULT_SET_CACHING = False
+    SUPPORTS_BULK_LOAD = False
+    SUPPORTS_CREATE_USER = False
+    SUPPORTS_MANUAL_MULTI_COLUMN_STATS = False
+    SUPPORTS_PREDICT = False
+    SUPPORTS_FOR_XML = False
+    SUPPORTS_SET_ROWCOUNT = False
+    SUPPORTS_SET_TRANSACTION_ISOLATION_LEVEL = False
+    SUPPORTS_SP_SHOWSPACEUSED = False
 
     # Supported data types in Fabric Data Warehouse (based on Microsoft documentation)
     SUPPORTED_DATA_TYPES = {
@@ -81,6 +103,37 @@ class Fabric(TSQL):
         "TIME": 6,  # Maximum 6 digits precision for fractions of seconds
     }
 
+    # Supported ALTER TABLE operations (very limited)
+    SUPPORTED_ALTER_TABLE_OPERATIONS = {
+        "ADD_NULLABLE_COLUMN",  # Only nullable columns of supported data types
+        "DROP_COLUMN",
+        "ADD_PRIMARY_KEY_NOT_ENFORCED",  # Only with NOT ENFORCED
+        "ADD_UNIQUE_NOT_ENFORCED",  # Only with NOT ENFORCED
+        "ADD_FOREIGN_KEY_NOT_ENFORCED",  # Only with NOT ENFORCED
+        "DROP_PRIMARY_KEY",
+        "DROP_UNIQUE",
+        "DROP_FOREIGN_KEY",
+    }
+
+    # Unsupported operations that should generate errors/warnings
+    UNSUPPORTED_OPERATIONS = {
+        "MERGE",
+        "BULK_LOAD",
+        "CREATE_USER",
+        "IDENTITY_COLUMNS",
+        "MATERIALIZED_VIEWS",
+        "RECURSIVE_QUERIES",
+        "RESULT_SET_CACHING",
+        "MANUAL_MULTI_COLUMN_STATS",
+        "PREDICT",
+        "FOR_XML",
+        "SET_ROWCOUNT",
+        "SET_TRANSACTION_ISOLATION_LEVEL",
+        "SP_SHOWSPACEUSED",
+        "TRIGGERS",
+        "FOR_JSON_IN_SUBQUERY",  # FOR JSON only allowed as last operator
+    }
+
     class Tokenizer(TSQL.Tokenizer):
         # Fabric uses case-sensitive keywords
         CASE_SENSITIVE = True
@@ -103,13 +156,17 @@ class Fabric(TSQL):
 
             # NTEXT -> VARCHAR(MAX)
             if self._match_text_seq("NTEXT"):
-                return exp.DataType.build("VARCHAR(MAX)")
+                return exp.DataType(
+                    this=exp.DataType.Type.VARCHAR, expressions=[exp.Identifier(this="MAX")]
+                )
 
             # TEXT -> VARCHAR(MAX)
             if self._match_text_seq("TEXT") and not self._match_text_seq(
                 "LONGTEXT", "MEDIUMTEXT", "TINYTEXT"
             ):
-                return exp.DataType.build("VARCHAR(MAX)")
+                return exp.DataType(
+                    this=exp.DataType.Type.VARCHAR, expressions=[exp.Identifier(this="MAX")]
+                )
 
             # DATETIME -> DATETIME2
             if self._match_text_seq("DATETIME") and not self._match_text_seq("DATETIME2"):
@@ -120,12 +177,12 @@ class Fabric(TSQL):
                     self._match_r_paren()
 
                 if precision:
-                    return exp.DataType.build(f"DATETIME2({precision})")
-                return exp.DataType.build("DATETIME2")
+                    return exp.DataType(this=exp.DataType.Type.DATETIME2, expressions=[precision])
+                return exp.DataType(this=exp.DataType.Type.DATETIME2)
 
             # SMALLDATETIME -> DATETIME2
             if self._match_text_seq("SMALLDATETIME"):
-                return exp.DataType.build("DATETIME2")
+                return exp.DataType(this=exp.DataType.Type.DATETIME2)
 
             # DATETIMEOFFSET -> DATETIME2 (with note that timezone info is lost)
             if self._match_text_seq("DATETIMEOFFSET"):
@@ -136,24 +193,32 @@ class Fabric(TSQL):
                     self._match_r_paren()
 
                 if precision:
-                    return exp.DataType.build(f"DATETIME2({precision})")
-                return exp.DataType.build("DATETIME2")
+                    return exp.DataType(this=exp.DataType.Type.DATETIME2, expressions=[precision])
+                return exp.DataType(this=exp.DataType.Type.DATETIME2)
 
             # TINYINT -> SMALLINT
             if self._match_text_seq("TINYINT"):
-                return exp.DataType.build("SMALLINT")
+                return exp.DataType(this=exp.DataType.Type.SMALLINT)
 
             # MONEY -> DECIMAL(19,4)
             if self._match_text_seq("MONEY") and not self._match_text_seq("SMALLMONEY"):
-                return exp.DataType.build("DECIMAL(19,4)")
+                return exp.DataType(
+                    this=exp.DataType.Type.DECIMAL,
+                    expressions=[exp.Literal.number("19"), exp.Literal.number("4")],
+                )
 
             # SMALLMONEY -> DECIMAL(10,4)
             if self._match_text_seq("SMALLMONEY"):
-                return exp.DataType.build("DECIMAL(10,4)")
+                return exp.DataType(
+                    this=exp.DataType.Type.DECIMAL,
+                    expressions=[exp.Literal.number("10"), exp.Literal.number("4")],
+                )
 
             # IMAGE -> VARBINARY(MAX)
             if self._match_text_seq("IMAGE"):
-                return exp.DataType.build("VARBINARY(MAX)")
+                return exp.DataType(
+                    this=exp.DataType.Type.VARBINARY, expressions=[exp.Identifier(this="MAX")]
+                )
 
             return super()._parse_types(
                 check_func=check_func, schema=schema, allow_identifiers=allow_identifiers
@@ -171,6 +236,12 @@ class Fabric(TSQL):
             # We'll allow this to be enforced at validation time rather than parse time
             # to maintain compatibility with existing code
             return table
+
+        def _parse_merge(self) -> exp.Merge:
+            """Override to block MERGE statements in Fabric."""
+            self.raise_error("MERGE statements are not supported in Microsoft Fabric")
+            # This should never be reached due to raise_error above
+            return super()._parse_merge()  # pragma: no cover
 
     class Generator(TSQL.Generator):
         # Fabric uses case-sensitive SQL
@@ -202,6 +273,32 @@ class Fabric(TSQL):
             """Override CREATE statements for Fabric limitations."""
             # Use the standard create_sql but with Fabric-specific table/column handling
             return super().create_sql(expression)
+
+        def alter_sql(self, expression: exp.Alter) -> str:
+            """Override ALTER TABLE for Fabric limitations."""
+            # Check for unsupported ALTER operations
+            if hasattr(expression, "actions") and expression.actions:
+                for action in expression.actions:
+                    if isinstance(action, exp.AddConstraint):
+                        constraint = action.args.get("constraint")
+                        if constraint and not action.args.get("not_enforced"):
+                            self.unsupported(
+                                "Fabric only supports table constraints with NOT ENFORCED option"
+                            )
+                    elif isinstance(action, exp.GeneratedAsIdentityColumnConstraint):
+                        self.unsupported("IDENTITY columns are not supported in Microsoft Fabric")
+                    elif isinstance(action, exp.AlterColumn):
+                        # Most ALTER COLUMN operations are not supported
+                        self.unsupported(
+                            "ALTER COLUMN operations are not supported in Microsoft Fabric"
+                        )
+
+            return super().alter_sql(expression)
+
+        def merge_sql(self, expression: exp.Merge) -> str:
+            """Override MERGE for Fabric (not supported)."""
+            self.unsupported("MERGE statements are not supported in Microsoft Fabric")
+            return ""
 
         def table_sql(self, expression: exp.Table, sep: str = " AS ") -> str:
             """Override table references to handle INFORMATION_SCHEMA uppercase requirement."""
@@ -305,7 +402,13 @@ class Fabric(TSQL):
             """Override TRUNCATE for Fabric limitations."""
             # Fabric supports TRUNCATE TABLE but with limitations
             # It doesn't support all the options that standard T-SQL does
-            table = self.sql(expression, "this")
+
+            # Get the first table from expressions
+            tables = expression.expressions
+            if not tables:
+                return "TRUNCATE TABLE"
+
+            table = self.sql(tables[0])
 
             # Fabric TRUNCATE is simpler - just TRUNCATE TABLE tablename
             return f"TRUNCATE TABLE {table}"
@@ -395,3 +498,32 @@ class Fabric(TSQL):
 
             # Use the standard TYPE_MAPPING for everything else
             return super().datatype_sql(expression)
+
+        def select_sql(self, expression: exp.Select) -> str:
+            """Override SELECT to handle FOR JSON restrictions."""
+            # Check for FOR JSON in subqueries (not allowed)
+            if hasattr(expression, "expressions"):
+                for expr in expression.expressions:
+                    if "FOR JSON" in str(expr).upper():
+                        # Check if this is in a subquery context
+                        parent = expression.parent
+                        while parent:
+                            if isinstance(parent, (exp.Select, exp.Subquery)):
+                                self.unsupported(
+                                    "FOR JSON must be the last operator in the query and is not allowed inside subqueries"
+                                )
+                                break
+                            parent = parent.parent
+
+            return super().select_sql(expression)
+
+        def setitem_sql(self, expression: exp.SetItem) -> str:
+            """Override SET statements for Fabric limitations."""
+            option = expression.args.get("this")
+            if option:
+                option_name = str(option).upper()
+                if option_name in ["ROWCOUNT", "TRANSACTION_ISOLATION_LEVEL"]:
+                    self.unsupported(f"SET {option_name} is not supported in Microsoft Fabric")
+                    return ""
+
+            return super().setitem_sql(expression)
