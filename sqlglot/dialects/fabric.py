@@ -164,15 +164,15 @@ class Fabric(TSQL):
 
                 sql = self.sql(select_into)
             else:
-                # For schema creation, we need to handle the database context properly
+                # For schema creation, we need to handle fully qualified names properly
                 if kind == "SCHEMA":
                     schema_name = expression.this
                     if isinstance(schema_name, exp.Identifier):
-                        # For Fabric, we create schema in the current database context
-                        # The schema name should be just the schema name, not qualified
+                        # Just use the schema name without database prefix
                         sql = f"CREATE SCHEMA [{schema_name.name}]"
                     else:
-                        sql = super(TSQL.Generator, self).create_sql(expression)
+                        # For qualified schema names (database.schema), preserve the full qualification
+                        sql = f"CREATE SCHEMA {self.sql(schema_name)}"
                 else:
                     sql = super(TSQL.Generator, self).create_sql(expression)
 
@@ -228,8 +228,11 @@ class Fabric(TSQL):
                     )
 
                     # For Fabric, we need to qualify INFORMATION_SCHEMA with the catalog/database
+                    # This is crucial for cross-database operations
                     information_schema_ref = "INFORMATION_SCHEMA.TABLES"
+
                     if table.catalog:
+                        # Explicit catalog provided
                         catalog_value = (
                             table.catalog if isinstance(table.catalog, str) else table.catalog.name
                         )
