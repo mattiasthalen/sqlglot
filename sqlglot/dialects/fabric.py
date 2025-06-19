@@ -121,6 +121,13 @@ class Fabric(TSQL):
             return type_sql
 
         def create_sql(self, expression: exp.Create) -> str:
+            """
+            Override create_sql to handle Fabric-specific requirements.
+
+            Key changes for Fabric:
+            1. Handle fully qualified schema names
+            2. Ensure proper database context for schema creation
+            """
             kind = expression.kind
             exists = expression.args.pop("exists", None)
 
@@ -157,14 +164,61 @@ class Fabric(TSQL):
 
                 sql = self.sql(select_into)
             else:
-                sql = super(TSQL.Generator, self).create_sql(expression)
+                # For schema creation, we need to handle the database context properly
+                if kind == "SCHEMA":
+                    schema_name = expression.this
+                    if isinstance(schema_name, exp.Identifier):
+                        # For Fabric, we create schema in the current database context
+                        # The schema name should be just the schema name, not qualified
+                        sql = f"CREATE SCHEMA [{schema_name.name}]"
+                    else:
+                        sql = super(TSQL.Generator, self).create_sql(expression)
+                else:
+                    sql = super(TSQL.Generator, self).create_sql(expression)
 
             if exists:
                 identifier = self.sql(exp.Literal.string(exp.table_name(table) if table else ""))
                 sql_with_ctes = self.prepend_ctes(expression, sql)
                 sql_literal = self.sql(exp.Literal.string(sql_with_ctes))
                 if kind == "SCHEMA":
-                    return f"""IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = {identifier}) EXEC({sql_literal})"""
+                    # For Fabric, we need to handle database context for schema creation
+                    # In CREATE SCHEMA, the schema name is stored in expression.this.db
+                    # and the catalog (if any) is in expression.this.catalog
+                    schema_table = expression.this
+
+                    if schema_table and hasattr(schema_table, "db"):
+                        schema_identifier = (
+                            schema_table.db
+                            if isinstance(schema_table.db, str)
+                            else schema_table.db.name
+                        )
+                    else:
+                        schema_identifier = str(expression.this)
+
+                    # Build the conditional check
+                    where_conditions = [
+                        f"SCHEMA_NAME = {self.sql(exp.Literal.string(schema_identifier))}"
+                    ]
+
+                    # For Fabric, we need to qualify INFORMATION_SCHEMA with the catalog/database
+                    information_schema_ref = "INFORMATION_SCHEMA.SCHEMATA"
+
+                    # If the schema creation has catalog context, use it to qualify INFORMATION_SCHEMA
+                    if schema_table and schema_table.catalog:
+                        catalog_value = (
+                            schema_table.catalog
+                            if isinstance(schema_table.catalog, str)
+                            else schema_table.catalog.name
+                        )
+                        catalog_name = self.sql(exp.Identifier(this=catalog_value))
+                        information_schema_ref = f"{catalog_name}.INFORMATION_SCHEMA.SCHEMATA"
+                        # Also add catalog condition to WHERE clause
+                        where_conditions.append(
+                            f"CATALOG_NAME = {self.sql(exp.Literal.string(catalog_value))}"
+                        )
+
+                    where_clause = " AND ".join(where_conditions)
+                    return f"""IF NOT EXISTS (SELECT * FROM {information_schema_ref} WHERE {where_clause}) EXEC({sql_literal})"""
                 elif kind == "TABLE":
                     assert table
                     where = exp.and_(
@@ -180,3 +234,29 @@ class Fabric(TSQL):
                 sql = sql.replace("CREATE OR REPLACE ", "CREATE OR ALTER ", 1)
 
             return self.prepend_ctes(expression, sql)
+
+        def table_parts(self, expression: exp.Table) -> str:
+            """
+            Override to ensure fully qualified table names in Fabric.
+
+            Fabric requires explicit catalog/database qualification in many cases,
+            especially when working across different databases/catalogs.
+            """
+            parts = []
+
+            # Always include catalog if available
+            catalog = expression.args.get("catalog")
+            if catalog:
+                parts.append(self.sql(catalog))
+
+            # Always include db/schema if available
+            db = expression.args.get("db")
+            if db:
+                parts.append(self.sql(db))
+
+            # Always include table name
+            table_name = expression.args.get("this")
+            if table_name:
+                parts.append(self.sql(table_name))
+
+            return ".".join(parts)

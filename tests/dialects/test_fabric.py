@@ -266,3 +266,43 @@ class TestFabric(Validator):
         self.validate_all("CAST(x AS VARCHAR(50))", write={"fabric": "CAST(x AS VARCHAR(50))"})
         self.validate_all("CAST(x AS INT)", write={"fabric": "CAST(x AS INT)"})
         self.validate_all("CAST(x AS BIGINT)", write={"fabric": "CAST(x AS BIGINT)"})
+
+    def test_fabric_fully_qualified_table_names(self):
+        """Test that Fabric generates fully qualified table names when catalog/db is provided"""
+        test_cases = [
+            # Table with catalog and schema
+            ("SELECT * FROM catalog.schema.table", "SELECT * FROM [catalog].[schema].[table]"),
+            # Table with just schema
+            ("SELECT * FROM schema.table", "SELECT * FROM [schema].[table]"),
+            # Simple table name (should remain unchanged)
+            ("SELECT * FROM table", "SELECT * FROM [table]"),
+        ]
+
+        for input_sql, expected in test_cases:
+            with self.subTest(input_sql=input_sql):
+                result = transpile(input_sql, read="fabric", write="fabric")[0]
+                self.assertIn(
+                    expected.replace("[", "").replace("]", ""),
+                    result.replace("[", "").replace("]", ""),
+                )
+
+    def test_fabric_create_schema_with_database_context(self):
+        """Test that CREATE SCHEMA IF NOT EXISTS works correctly with database context"""
+        sql = "CREATE SCHEMA IF NOT EXISTS test_schema"
+        result = transpile(sql, read="fabric", write="fabric")[0]
+
+        # Should generate the conditional DDL with proper INFORMATION_SCHEMA reference
+        self.assertIn("IF NOT EXISTS", result)
+        self.assertIn("INFORMATION_SCHEMA.SCHEMATA", result)
+        self.assertIn("SCHEMA_NAME", result)
+        self.assertIn("CREATE SCHEMA", result)
+
+    def test_fabric_create_table_fully_qualified(self):
+        """Test CREATE TABLE with fully qualified names"""
+        sql = "CREATE TABLE catalog.schema.test_table (id INT)"
+        result = transpile(sql, read="fabric", write="fabric")[0]
+
+        # Should preserve the fully qualified name
+        self.assertIn("catalog", result)
+        self.assertIn("schema", result)
+        self.assertIn("test_table", result)
