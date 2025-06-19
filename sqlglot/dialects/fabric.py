@@ -226,7 +226,17 @@ class Fabric(TSQL):
                         exp.column("TABLE_SCHEMA").eq(table.db) if table.db else None,
                         exp.column("TABLE_CATALOG").eq(table.catalog) if table.catalog else None,
                     )
-                    return f"""IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE {where}) EXEC({sql_literal})"""
+
+                    # For Fabric, we need to qualify INFORMATION_SCHEMA with the catalog/database
+                    information_schema_ref = "INFORMATION_SCHEMA.TABLES"
+                    if table.catalog:
+                        catalog_value = (
+                            table.catalog if isinstance(table.catalog, str) else table.catalog.name
+                        )
+                        catalog_name = self.sql(exp.Identifier(this=catalog_value))
+                        information_schema_ref = f"{catalog_name}.INFORMATION_SCHEMA.TABLES"
+
+                    return f"""IF NOT EXISTS (SELECT * FROM {information_schema_ref} WHERE {self.sql(where)}) EXEC({sql_literal})"""
                 elif kind == "INDEX":
                     index = self.sql(exp.Literal.string(expression.this.text("this")))
                     return f"""IF NOT EXISTS (SELECT * FROM sys.indexes WHERE object_id = object_id({identifier}) AND name = {index}) EXEC({sql_literal})"""

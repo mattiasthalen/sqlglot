@@ -306,3 +306,24 @@ class TestFabric(Validator):
         self.assertIn("catalog", result)
         self.assertIn("schema", result)
         self.assertIn("test_table", result)
+
+    def test_fabric_create_table_with_catalog_qualified_information_schema(self):
+        """Test that CREATE TABLE IF NOT EXISTS with catalog uses qualified INFORMATION_SCHEMA"""
+        sql = "CREATE TABLE IF NOT EXISTS my_catalog.my_schema.test_table (id INT)"
+        result = transpile(sql, read="fabric", write="fabric")[0]
+
+        # Should use catalog-qualified INFORMATION_SCHEMA.TABLES
+        self.assertIn("my_catalog.INFORMATION_SCHEMA.TABLES", result)
+        self.assertIn("TABLE_NAME = 'test_table'", result)
+        self.assertIn("TABLE_SCHEMA = 'my_schema'", result)
+        self.assertIn("TABLE_CATALOG = 'my_catalog'", result)
+
+    def test_fabric_create_schema_with_catalog_qualified_information_schema(self):
+        """Test that CREATE SCHEMA IF NOT EXISTS with catalog uses qualified INFORMATION_SCHEMA"""
+        sql = "CREATE SCHEMA IF NOT EXISTS my_catalog.my_schema"
+        result = transpile(sql, read="fabric", write="fabric")[0]
+
+        # Should use catalog-qualified INFORMATION_SCHEMA.SCHEMATA
+        self.assertIn("my_catalog.INFORMATION_SCHEMA.SCHEMATA", result)
+        self.assertIn("SCHEMA_NAME = 'my_schema'", result)
+        self.assertIn("CATALOG_NAME = 'my_catalog'", result)
